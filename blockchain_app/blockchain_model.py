@@ -1,3 +1,4 @@
+from copy import deepcopy
 from exceptions import OverSpentError, InvalidHashError
 from utils import custom_hash, encode_key, decode_key
 
@@ -24,7 +25,7 @@ class Transaction:
     def hash_id(self) -> None:
         return custom_hash(self)
         
-    def __dict__(self, keys: Optional[List[str]] = ['timestamp', 'recipient', 'amount']) -> Dict:
+    def to_dict(self, keys: Optional[List[str]] = ['timestamp', 'recipient', 'amount']) -> Dict:
         keys = keys
         d = asdict(self)
         res = {key: d[key] for key in d.keys() & keys}
@@ -71,7 +72,7 @@ class Block:
         msg = f"Block(previous_hash={self.previous_hash[:15]})"
         return msg
     
-    def __dict__(self, keys: Optional[List[str]]) -> Dict:
+    def to_dict(self, keys: Optional[List[str]]) -> Dict:
         if not keys:
             keys = ['previous_hash', 'timestamp', 'miner', 'nonce', 'transactions']
         d = asdict(self)
@@ -129,9 +130,9 @@ class Peer:
 
 @dataclass
 class BlockChain:
-    chain: Deque[Block] = field(default_factory=deque, repr=False)
-    current_transactions:Deque[Transaction] = field(default_factory=deque, repr=False)
-    peer_transactions: DefaultDict(Deque) = field(default_factory=lambda: defaultdict(deque), repr=False)
+    chain: Deque[Block] = field(default_factory=deque)
+    current_transactions:Deque[Transaction] = field(default_factory=deque)
+    peer_transactions: DefaultDict(Deque) = field(default_factory=lambda: defaultdict(deque))
     
     def __repr__(self):
         if self.chain:
@@ -143,26 +144,25 @@ class BlockChain:
 @dataclass
 class Node:
     nodes: List = field(default_factory=list, repr=False)
-    peers: List[Peer] = field(default_factory=list, repr=False)
+    # peers: List[Peer] = field(default_factory=list, repr=False)
     uuid: str = field(default_factory=uuid.uuid4)
     
     def __post_init__(self):
         self.blockchain = BlockChain()
         self.peer = self.set_peer()
-        # self.network = self.get_network
-        # if self.network:
+
         if self.nodes:
-            self.blockchain = self.get_chain_from_network()
+            self.blockchain.chain = self.consensus()
         else:
             self.mine_block()
     
-    def get_peer(self, address) -> Peer:
-        # return self.peers.index()
-        return [p for p in self.peers if p.pubkey==address][0]
+    # def get_peer(self, address) -> Peer:
+    #     # return self.peers.index()
+    #     return [p for p in self.peers if p.pubkey==address][0]
     
     def set_peer(self) -> Peer:
         peer = Peer(node=self)
-        self.peers.append(peer)
+        # self.peers.append(peer)
         return peer
     
     def mine_block(self):
@@ -195,6 +195,7 @@ class Node:
         if is_balance:
             self.blockchain.current_transactions.appendleft(new_tx)
             self.blockchain.peer_transactions[sender_address].appendleft(new_tx)
+            self.broadcast_transaction(sender_address, new_tx)
             return True
         
         input_txs = [tx for tx in self.blockchain.peer_transactions[sender_address] if not tx.is_spent]
@@ -209,6 +210,7 @@ class Node:
             
         self.blockchain.current_transactions.appendleft(new_tx)
         self.blockchain.peer_transactions[new_tx.recipient].appendleft(new_tx)
+        self.broadcast_transaction(sender_address, new_tx)
         
         balance_tx = Transaction.balance_transaction(new_tx)
         return balance_tx
@@ -249,11 +251,45 @@ class Node:
             continue
         return "This chain is valid"
     
-    def get_chain(self):
-        pass
+    def get_chain(self, uuid: str) -> Deque[Block]:
+        connected_node = [n for n in self.nodes if n.uuid == uuid][0]
+        new_chain = connected_node.blockchain.chain
+        return new_chain
+            
+    def consensus(self):
+        msg = f"Out chain is authoritative"
+        self.verify_chain(self.blockchain.chain)
+        authoritative_chain = deepcopy(self.blockchain.chain)
+        
+        for n in self.nodes:
+            new_chain = self.get_chain(n.uuid)
+            self.verify_chain(new_chain)
+            if len(authoritative_chain) < len(new_chain):
+                authoritative_chain = deepcopy(new_chain)
+                msg = f"Out chain is replaced by the chain of node[{n.uuid}]"
+                
+        print(msg)
+        self.blockchain.chain = authoritative_chain
+        return authoritative_chain
+            
+        
+    def broadcast_transaction(self, sender_address, transaction):
+        succeed_nodes = list()
+        try:
+            for n in self.nodes:
+                n.submit_transaction(sender_address, transaction)
+                succeed_nodes.append(n)
+        except Exception as e:
+            print(e)
+        return succeed_nodes
     
-    def broadcast(self):
-        pass
+    def add_block(self, block: Block):
+        self.verify_chain(self.blockchain.chain)
+        self.verify_block(block, self.blockchain.chain[0])
+        self.blockchain.chain.appendleft(block)
+        return block
     
-    def get_network(self):
-        pass
+    def connect_node(self, other) -> List:
+        self.nodes.append(other)
+        return self.nodes
+        
