@@ -1,3 +1,4 @@
+from blockchain_app.exceptions import InvalidHashError
 from functools import reduce
 from hashlib import sha256
 
@@ -15,8 +16,13 @@ def valid_chain(blockchain) -> bool:
         
         target_hash = custom_hash(previous_block, last_block.nonce)
         if last_block.previous_hash != target_hash:
-            raise AttributeError("Invalid Chain")
+            block_index = len(blockchain) - (blockchain.index(previous_block)+1)
+            raise InvalidHashError(
+                target_hash=target_hash,
+                registered_hash=last_block.previous_hash,
+                block_index=block_index
+                )
         else:
             chain.popleft()
             continue
-    return True
+    return "This chain is valid"

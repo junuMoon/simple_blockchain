@@ -1,4 +1,5 @@
-from .utils import custom_hash, valid_chain
+from blockchain_app.exceptions import OverSpentError
+from blockchain_app.utils import custom_hash, valid_chain
 
 from collections import defaultdict, deque
 from dataclasses import asdict, dataclass, field
@@ -13,14 +14,15 @@ import rsa
 class Transaction:
     recipient: str
     amount: int
-    timestamp: datetime = field(default_factory=datetime.now, repr=True)  # default_factory=datetime.now() -> 'datetime.datetime' object is not callable. 
+    timestamp: datetime = field(default_factory=datetime.now, repr=True)
     signature: bytes = field(init=False, repr=False)
     is_spent: bool = field(default=False, repr=False)
     
     input_transactions: List['Transaction'] = field(default_factory=list, repr=False)
     
-    def __post_init__(self) -> None:
-        self.hash_id = custom_hash(self)
+    @property
+    def hash_id(self) -> None:
+        return custom_hash(self)
         
     def __dict__(self, keys: Optional[List[str]] = ['timestamp', 'recipient', 'amount']) -> Dict:
         keys = keys
@@ -34,8 +36,6 @@ class Transaction:
         if not self.input_transactions:  # it means it's reward transaction
             return self.amount
         b = reduce(lambda x, y: x+y, [t.amount for t in self.input_transactions]) - self.amount
-        if b < 0:
-            raise AttributeError("The required amount of coins exceed the balance")
         return b
     
     @classmethod
@@ -77,10 +77,11 @@ class Block:
     nonce: int
     miner: str
     timestamp: datetime = field(default_factory=datetime.now, repr=True)
-    transactions: Deque[Transaction] = field(default_factory=deque, repr=False)
+    transactions: Deque[Transaction] = field(default_factory=deque, repr=True)
     
-    def __dict__(self, keys: Optional[List[str]] = ['previous_hash', 'timestamp', 'miner', 'nonce', 'transactions']) -> Dict:
-        keys = keys
+    def __dict__(self, keys: Optional[List[str]]) -> Dict:
+        if not keys:
+            keys = ['previous_hash', 'timestamp', 'miner', 'nonce', 'transactions']
         d = asdict(self)
         res = {key: d[key] for key in d.keys() & keys}
         
@@ -109,7 +110,7 @@ node_transactions = defaultdict(deque)          # type: DefaultDict[Node, Deque[
 nodes = set()                                   # type: set(Node)
 
 
-def mine_block(miner: str) -> None:
+def mine_block(miner: str) -> Block:
     valid_chain(blockchain=blockchain)
     
     try:
@@ -126,6 +127,8 @@ def mine_block(miner: str) -> None:
     _txs_to_block(miner, new_block)
     blockchain.appendleft(new_block)
     
+    return new_block
+    
 def _txs_to_block(node_name: str, block: Block) -> None:
     reward_tx = Transaction.reward_transcation(node_name)
     node_transactions[node_name].appendleft(reward_tx)
@@ -133,41 +136,48 @@ def _txs_to_block(node_name: str, block: Block) -> None:
     block.transactions = current_transactions.copy()
     current_transactions.clear()
 
-def submit_transaction(sender_address: str, recipient_address: str, amount: int) -> None:
+def submit_transaction(sender_address: str, recipient_address: str, amount: int) -> List[Transaction]:
     assert sender_address != recipient_address
     sender = get_node(sender_address)
     
-    input_txs = list()
-    for tx in node_transactions[sender_address]:
-        if not tx.is_spent:
-            tx.is_spent = True
-            input_txs.append(tx)    
+    input_txs = [tx for tx in node_transactions[sender_address] if not tx.is_spent]
         
     new_tx = Transaction(
         recipient=recipient_address,
         amount=amount,
         input_transactions=input_txs
     )
-    sender.sign_transaction(new_tx) 
-    current_transactions.appendleft(new_tx)
-    node_transactions[recipient_address].appendleft(new_tx)
     
-    balance_tx = Transaction.balance_transaction(new_tx)
-    sender.sign_transaction(balance_tx)
-    current_transactions.appendleft(balance_tx)
-    node_transactions[sender_address].appendleft(balance_tx)
+    if new_tx.balance < 0:
+        raise OverSpentError(sender=sender.name, amount=new_tx.balance)
+    else:
+        # submit new transaction
+        for tx in new_tx.input_transactions:
+            tx.is_spent = True
+        sender.sign_transaction(new_tx) 
+        current_transactions.appendleft(new_tx)
+        node_transactions[recipient_address].appendleft(new_tx)
+        
+        # submit balance transaction of new transaction
+        balance_tx = Transaction.balance_transaction(new_tx)
+        sender.sign_transaction(balance_tx)
+        current_transactions.appendleft(balance_tx)
+        node_transactions[sender_address].appendleft(balance_tx)
+
+    return [new_tx, balance_tx]
     
 def verify_transaction(sender_address, transaction: Transaction) -> None:
     try:
         sender = get_node(sender_address)
         rsa.verify(str(transaction).encode(), transaction.signature, sender.pubkey)
-        print("The signature is valid")
-    except rsa.VerificationError:
+        return "The signature is valid"
+    except rsa.VerificationError as e:
+        print(e)
         print("Invalid signature!")
 
 def set_node(name: str) -> None:        
     if any(list(filter(lambda x: x.name==name, nodes))):
-        raise AttributeError("The name is already used by existing object")
+        raise AttributeError("The name is already used by existing node")
             
     n = Node(name=name)
     nodes.add(n)
