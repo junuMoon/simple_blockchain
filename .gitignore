@@ -1,5 +1,7 @@
 #venv
 venv/
+test/
+build/
 
 *.json
 *.pyc
